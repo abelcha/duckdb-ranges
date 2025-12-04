@@ -6,6 +6,7 @@
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/common/vector_operations/ternary_executor.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
 namespace duckdb {
@@ -65,62 +66,124 @@ static bool IsEmpty(const Int4Range &range) {
 	return false;
 }
 
-static void Int4RangeConstructor(DataChunk &args, ExpressionState &state, Vector &result) {
+static string_t ConstructInt4RangeValue(Vector &result, int32_t lower, int32_t upper, bool lower_inc, bool upper_inc) {
+	Int4Range range = {lower, upper, lower_inc, upper_inc};
+	return SerializeInt4Range(range, result);
+}
+static Int4Range ParseInt4Range(const string &input_str) {
+	const string &s = input_str;
+
+	if (StringUtil::CIEquals(s, "empty")) {
+		return {1, 0, false, false}; // Canonical empty
+	}
+
+	if (s.length() < 3) {
+		throw InvalidInputException("Malformed range literal: \"%s\"", input_str);
+	}
+
+	bool lower_inc;
+	if (s.front() == '[') {
+		lower_inc = true;
+	} else if (s.front() == '(') {
+		lower_inc = false;
+	} else {
+		throw InvalidInputException("Malformed range literal: \"%s\"", input_str);
+	}
+
+	bool upper_inc;
+	if (s.back() == ']') {
+		upper_inc = true;
+	} else if (s.back() == ')') {
+		upper_inc = false;
+	} else {
+		throw InvalidInputException("Malformed range literal: \"%s\"", input_str);
+	}
+
+	auto comma_pos = s.find(',');
+	if (comma_pos == string::npos) {
+		throw InvalidInputException("Malformed range literal: \"%s\" (missing comma)", input_str);
+	}
+
+	string lower_str = s.substr(1, comma_pos - 1);
+	string upper_str = s.substr(comma_pos + 1, s.length() - comma_pos - 2);
+
+	int32_t lower, upper;
+	try {
+		lower = std::stoi(lower_str);
+		upper = std::stoi(upper_str);
+	} catch (...) {
+		throw InvalidInputException("Invalid integer in range literal: \"%s\"", input_str);
+	}
+
+	return {lower, upper, lower_inc, upper_inc};
+}
+
+static void Int4RangeConstructor4(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &lower_vec = args.data[0];
 	auto &upper_vec = args.data[1];
-	auto &bounds_vec = args.data[2];
+	auto &lower_inc_vec = args.data[2];
+	auto &upper_inc_vec = args.data[3];
 	idx_t count = args.size();
 
-	UnifiedVectorFormat lower_data, upper_data, bounds_data;
+	UnifiedVectorFormat lower_data, upper_data, lower_inc_data, upper_inc_data;
 	lower_vec.ToUnifiedFormat(count, lower_data);
 	upper_vec.ToUnifiedFormat(count, upper_data);
-	bounds_vec.ToUnifiedFormat(count, bounds_data);
+	lower_inc_vec.ToUnifiedFormat(count, lower_inc_data);
+	upper_inc_vec.ToUnifiedFormat(count, upper_inc_data);
 
 	auto lower_ptr = UnifiedVectorFormat::GetData<int32_t>(lower_data);
 	auto upper_ptr = UnifiedVectorFormat::GetData<int32_t>(upper_data);
-	auto bounds_ptr = UnifiedVectorFormat::GetData<string_t>(bounds_data);
+	auto lower_inc_ptr = UnifiedVectorFormat::GetData<bool>(lower_inc_data);
+	auto upper_inc_ptr = UnifiedVectorFormat::GetData<bool>(upper_inc_data);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto lower_idx = lower_data.sel->get_index(i);
 		auto upper_idx = upper_data.sel->get_index(i);
-		auto bounds_idx = bounds_data.sel->get_index(i);
+		auto lower_inc_idx = lower_inc_data.sel->get_index(i);
+		auto upper_inc_idx = upper_inc_data.sel->get_index(i);
 
 		if (!lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx) ||
-		    !bounds_data.validity.RowIsValid(bounds_idx)) {
+		    !lower_inc_data.validity.RowIsValid(lower_inc_idx) || !upper_inc_data.validity.RowIsValid(upper_inc_idx)) {
 			FlatVector::SetNull(result, i, true);
 			continue;
 		}
 
-		int32_t lower = lower_ptr[lower_idx];
-		int32_t upper = upper_ptr[upper_idx];
-		string bounds_str = bounds_ptr[bounds_idx].GetString();
-
-		// Parse bounds - default is [) (lower inclusive, upper exclusive)
-		bool lower_inc = true;
-		bool upper_inc = false;
-
-		if (!bounds_str.empty()) {
-			if (bounds_str == "[)") {
-				lower_inc = true;
-				upper_inc = false;
-			} else if (bounds_str == "[]") {
-				lower_inc = true;
-				upper_inc = true;
-			} else if (bounds_str == "(]") {
-				lower_inc = false;
-				upper_inc = true;
-			} else if (bounds_str == "()") {
-				lower_inc = false;
-				upper_inc = false;
-			} else {
-				throw InvalidInputException("Invalid bounds: " + bounds_str);
-			}
-		}
-
-		Int4Range range = {lower, upper, lower_inc, upper_inc};
-		auto serialized = SerializeInt4Range(range, result);
+		auto serialized = ConstructInt4RangeValue(result, lower_ptr[lower_idx], upper_ptr[upper_idx],
+		                                          lower_inc_ptr[lower_inc_idx], upper_inc_ptr[upper_inc_idx]);
 		FlatVector::GetData<string_t>(result)[i] = serialized;
 	}
+}
+
+static void Int4RangeConstructor(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &lower_vec = args.data[0];
+	auto &upper_vec = args.data[1];
+	auto &bounds_vec = args.data[2];
+
+	TernaryExecutor::Execute<int32_t, int32_t, string_t, string_t>(
+	    lower_vec, upper_vec, bounds_vec, result, args.size(), [&](int32_t lower, int32_t upper, string_t bounds_blob) {
+		    string bounds_str = bounds_blob.GetString();
+		    bool lower_inc = true;
+		    bool upper_inc = false;
+
+		    if (!bounds_str.empty()) {
+			    if (bounds_str == "[)") {
+				    lower_inc = true;
+				    upper_inc = false;
+			    } else if (bounds_str == "[]") {
+				    lower_inc = true;
+				    upper_inc = true;
+			    } else if (bounds_str == "(]") {
+				    lower_inc = false;
+				    upper_inc = true;
+			    } else if (bounds_str == "()") {
+				    lower_inc = false;
+				    upper_inc = false;
+			    } else {
+				    throw InvalidInputException("Invalid bounds: " + bounds_str);
+			    }
+		    }
+		    return ConstructInt4RangeValue(result, lower, upper, lower_inc, upper_inc);
+	    });
 }
 
 static bool Int4RangeToVarchar(Vector &source, Vector &result, idx_t count, CastParameters &parameters) {
@@ -146,6 +209,34 @@ static bool Int4RangeToVarchar(Vector &source, Vector &result, idx_t count, Cast
 		FlatVector::GetData<string_t>(result)[i] = StringVector::AddString(result, str);
 	}
 	return true;
+}
+
+static bool VarcharToInt4RangeCast(Vector &source, Vector &result, idx_t count, CastParameters &parameters) {
+	UnifiedVectorFormat source_data;
+	source.ToUnifiedFormat(count, source_data);
+	auto source_ptr = UnifiedVectorFormat::GetData<string_t>(source_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = source_data.sel->get_index(i);
+		if (!source_data.validity.RowIsValid(idx)) {
+			FlatVector::SetNull(result, i, true);
+			continue;
+		}
+
+		Int4Range range = ParseInt4Range(source_ptr[idx].GetString());
+		auto serialized = SerializeInt4Range(range, result);
+		FlatVector::GetData<string_t>(result)[i] = serialized;
+	}
+	return true;
+}
+
+// 1-arg constructor: int4range(varchar)
+static void Int4RangeConstructor1(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &input_vec = args.data[0];
+	UnaryExecutor::Execute<string_t, string_t>(input_vec, result, args.size(), [&](string_t input) {
+		Int4Range range = ParseInt4Range(input.GetString());
+		return SerializeInt4Range(range, result);
+	});
 }
 
 static void RangeOverlaps(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -238,32 +329,10 @@ static void RangeUpperInc(DataChunk &args, ExpressionState &state, Vector &resul
 static void Int4RangeConstructor2(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &lower_vec = args.data[0];
 	auto &upper_vec = args.data[1];
-	idx_t count = args.size();
 
-	UnifiedVectorFormat lower_data, upper_data;
-	lower_vec.ToUnifiedFormat(count, lower_data);
-	upper_vec.ToUnifiedFormat(count, upper_data);
-
-	auto lower_ptr = UnifiedVectorFormat::GetData<int32_t>(lower_data);
-	auto upper_ptr = UnifiedVectorFormat::GetData<int32_t>(upper_data);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto lower_idx = lower_data.sel->get_index(i);
-		auto upper_idx = upper_data.sel->get_index(i);
-
-		if (!lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx)) {
-			FlatVector::SetNull(result, i, true);
-			continue;
-		}
-
-		int32_t lower = lower_ptr[lower_idx];
-		int32_t upper = upper_ptr[upper_idx];
-
-		// Default bounds: [) (lower inclusive, upper exclusive)
-		Int4Range range = {lower, upper, true, false};
-		auto serialized = SerializeInt4Range(range, result);
-		FlatVector::GetData<string_t>(result)[i] = serialized;
-	}
+	BinaryExecutor::Execute<int32_t, int32_t, string_t>(
+	    lower_vec, upper_vec, result, args.size(),
+	    [&](int32_t lower, int32_t upper) { return ConstructInt4RangeValue(result, lower, upper, true, false); });
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
@@ -279,8 +348,21 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                              Int4RangeConstructor2);
 	loader.RegisterFunction(int4range_fun2);
 
+	// Constructor: int4range(varchar) -> INT4RANGE
+	ScalarFunction int4range_fun1("int4range", {LogicalType::VARCHAR}, GetInt4RangeType(), Int4RangeConstructor1);
+	loader.RegisterFunction(int4range_fun1);
+
+	// Constructor: int4range(lower INT, upper INT, lower_inc BOOLEAN, upper_inc BOOLEAN) -> INT4RANGE
+	ScalarFunction int4range_fun4(
+	    "int4range", {LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::BOOLEAN, LogicalType::BOOLEAN},
+	    GetInt4RangeType(), Int4RangeConstructor4);
+	loader.RegisterFunction(int4range_fun4);
+
 	// Cast: INT4RANGE -> VARCHAR
 	loader.RegisterCastFunction(GetInt4RangeType(), LogicalType::VARCHAR, BoundCastInfo(Int4RangeToVarchar), 1);
+
+	// Cast: VARCHAR -> INT4RANGE
+	loader.RegisterCastFunction(LogicalType::VARCHAR, GetInt4RangeType(), BoundCastInfo(VarcharToInt4RangeCast), 1);
 
 	// Operator: range_overlaps(INT4RANGE, INT4RANGE) -> BOOLEAN
 	ScalarFunction overlaps_fun("range_overlaps", {GetInt4RangeType(), GetInt4RangeType()}, LogicalType::BOOLEAN,
