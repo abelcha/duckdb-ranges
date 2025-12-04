@@ -203,7 +203,7 @@ SELECT range_overlaps(int4range(1, 5, '[)'), NULL);
 NULL
 
 query I
-SELECT range_overlaps(NULL, NULL);
+SELECT range_overlaps(NULL::INT4RANGE, NULL::INT4RANGE);
 ----
 NULL
 

@@ -18,6 +18,13 @@ struct Int4Range {
 	bool upper_inc;
 };
 
+struct NumRange {
+	double lower;
+	double upper;
+	bool lower_inc;
+	bool upper_inc;
+};
+
 LogicalType GetInt4RangeType() {
 	auto type = LogicalType(LogicalTypeId::BLOB);
 	type.SetAlias("INT4RANGE");
@@ -354,6 +361,331 @@ static void Int4RangeConstructor2(DataChunk &args, ExpressionState &state, Vecto
 	    [&](int32_t lower, int32_t upper) { return ConstructInt4RangeValue(result, lower, upper, true, false); });
 }
 
+//===--------------------------------------------------------------------===//
+// NUMRANGE Implementation
+//===--------------------------------------------------------------------===//
+
+LogicalType GetNumRangeType() {
+	auto type = LogicalType(LogicalTypeId::BLOB);
+	type.SetAlias("NUMRANGE");
+	return type;
+}
+
+static string_t SerializeNumRange(const NumRange &range, Vector &result) {
+	const size_t size = sizeof(double) * 2 + sizeof(uint8_t);
+	auto data = StringVector::EmptyString(result, size);
+	auto ptr = data.GetDataWriteable();
+	memcpy(ptr, &range.lower, sizeof(double));
+	memcpy(ptr + sizeof(double), &range.upper, sizeof(double));
+	uint8_t bounds = (range.lower_inc ? 0b10 : 0) | (range.upper_inc ? 0b01 : 0);
+	memcpy(ptr + sizeof(double) * 2, &bounds, sizeof(uint8_t));
+	return data;
+}
+
+static NumRange DeserializeNumRange(const string_t &blob) {
+	const size_t expected_size = sizeof(double) * 2 + sizeof(uint8_t);
+	if (blob.GetSize() < expected_size) {
+		throw InvalidInputException("Invalid NUMRANGE blob: expected %zu bytes, got %zu", expected_size,
+		                            blob.GetSize());
+	}
+	NumRange range;
+	auto ptr = blob.GetDataUnsafe();
+	memcpy(&range.lower, ptr, sizeof(double));
+	memcpy(&range.upper, ptr + sizeof(double), sizeof(double));
+	uint8_t bounds;
+	memcpy(&bounds, ptr + sizeof(double) * 2, sizeof(uint8_t));
+	range.lower_inc = (bounds & 0b10) != 0;
+	range.upper_inc = (bounds & 0b01) != 0;
+	return range;
+}
+
+static bool IsEmptyNum(const NumRange &range) {
+	if (range.lower > range.upper) {
+		return true;
+	}
+	if (range.lower == range.upper) {
+		return !(range.lower_inc && range.upper_inc);
+	}
+	return false;
+}
+
+static string_t ConstructNumRangeValue(Vector &result, double lower, double upper, bool lower_inc, bool upper_inc) {
+	NumRange range = {lower, upper, lower_inc, upper_inc};
+	return SerializeNumRange(range, result);
+}
+
+static NumRange ParseNumRange(const string &input_str) {
+	const string &s = input_str;
+
+	if (StringUtil::CIEquals(s, "empty")) {
+		return {1.0, 0.0, false, false}; // Canonical empty
+	}
+
+	if (s.length() < 3) {
+		throw InvalidInputException("Malformed range literal: \"%s\"", input_str);
+	}
+
+	bool lower_inc;
+	if (s.front() == '[') {
+		lower_inc = true;
+	} else if (s.front() == '(') {
+		lower_inc = false;
+	} else {
+		throw InvalidInputException("Malformed range literal: \"%s\"", input_str);
+	}
+
+	bool upper_inc;
+	if (s.back() == ']') {
+		upper_inc = true;
+	} else if (s.back() == ')') {
+		upper_inc = false;
+	} else {
+		throw InvalidInputException("Malformed range literal: \"%s\"", input_str);
+	}
+
+	auto comma_pos = s.find(',');
+	if (comma_pos == string::npos) {
+		throw InvalidInputException("Malformed range literal: \"%s\" (missing comma)", input_str);
+	}
+
+	string lower_str = s.substr(1, comma_pos - 1);
+	string upper_str = s.substr(comma_pos + 1, s.length() - comma_pos - 2);
+
+	double lower, upper;
+	try {
+		lower = std::stod(lower_str);
+		upper = std::stod(upper_str);
+	} catch (...) {
+		throw InvalidInputException("Invalid number in range literal: \"%s\"", input_str);
+	}
+
+	return {lower, upper, lower_inc, upper_inc};
+}
+
+static void NumRangeConstructor4(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &lower_vec = args.data[0];
+	auto &upper_vec = args.data[1];
+	auto &lower_inc_vec = args.data[2];
+	auto &upper_inc_vec = args.data[3];
+	idx_t count = args.size();
+
+	UnifiedVectorFormat lower_data, upper_data, lower_inc_data, upper_inc_data;
+	lower_vec.ToUnifiedFormat(count, lower_data);
+	upper_vec.ToUnifiedFormat(count, upper_data);
+	lower_inc_vec.ToUnifiedFormat(count, lower_inc_data);
+	upper_inc_vec.ToUnifiedFormat(count, upper_inc_data);
+
+	auto lower_ptr = UnifiedVectorFormat::GetData<double>(lower_data);
+	auto upper_ptr = UnifiedVectorFormat::GetData<double>(upper_data);
+	auto lower_inc_ptr = UnifiedVectorFormat::GetData<bool>(lower_inc_data);
+	auto upper_inc_ptr = UnifiedVectorFormat::GetData<bool>(upper_inc_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto lower_idx = lower_data.sel->get_index(i);
+		auto upper_idx = upper_data.sel->get_index(i);
+		auto lower_inc_idx = lower_inc_data.sel->get_index(i);
+		auto upper_inc_idx = upper_inc_data.sel->get_index(i);
+
+		if (!lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx) ||
+		    !lower_inc_data.validity.RowIsValid(lower_inc_idx) || !upper_inc_data.validity.RowIsValid(upper_inc_idx)) {
+			FlatVector::SetNull(result, i, true);
+			continue;
+		}
+
+		auto serialized = ConstructNumRangeValue(result, lower_ptr[lower_idx], upper_ptr[upper_idx],
+		                                         lower_inc_ptr[lower_inc_idx], upper_inc_ptr[upper_inc_idx]);
+		FlatVector::GetData<string_t>(result)[i] = serialized;
+	}
+}
+
+static void NumRangeConstructor(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &lower_vec = args.data[0];
+	auto &upper_vec = args.data[1];
+	auto &bounds_vec = args.data[2];
+
+	TernaryExecutor::Execute<double, double, string_t, string_t>(
+	    lower_vec, upper_vec, bounds_vec, result, args.size(), [&](double lower, double upper, string_t bounds_blob) {
+		    string bounds_str = bounds_blob.GetString();
+		    bool lower_inc = true;
+		    bool upper_inc = false;
+
+		    if (!bounds_str.empty()) {
+			    if (bounds_str == "[)") {
+				    lower_inc = true;
+				    upper_inc = false;
+			    } else if (bounds_str == "[]") {
+				    lower_inc = true;
+				    upper_inc = true;
+			    } else if (bounds_str == "(]") {
+				    lower_inc = false;
+				    upper_inc = true;
+			    } else if (bounds_str == "()") {
+				    lower_inc = false;
+				    upper_inc = false;
+			    } else {
+				    throw InvalidInputException("Invalid bounds: " + bounds_str);
+			    }
+		    }
+		    return ConstructNumRangeValue(result, lower, upper, lower_inc, upper_inc);
+	    });
+}
+
+static bool NumRangeToVarchar(Vector &source, Vector &result, idx_t count, CastParameters &parameters) {
+	UnifiedVectorFormat source_data;
+	source.ToUnifiedFormat(count, source_data);
+	auto source_ptr = UnifiedVectorFormat::GetData<string_t>(source_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = source_data.sel->get_index(i);
+		if (!source_data.validity.RowIsValid(idx)) {
+			FlatVector::SetNull(result, i, true);
+			continue;
+		}
+
+		auto range = DeserializeNumRange(source_ptr[idx]);
+		string str;
+		if (IsEmptyNum(range)) {
+			str = "empty";
+		} else {
+			str = (range.lower_inc ? "[" : "(") + std::to_string(range.lower) + "," + std::to_string(range.upper) +
+			      (range.upper_inc ? "]" : ")");
+		}
+		FlatVector::GetData<string_t>(result)[i] = StringVector::AddString(result, str);
+	}
+	return true;
+}
+
+static bool VarcharToNumRangeCast(Vector &source, Vector &result, idx_t count, CastParameters &parameters) {
+	UnifiedVectorFormat source_data;
+	source.ToUnifiedFormat(count, source_data);
+	auto source_ptr = UnifiedVectorFormat::GetData<string_t>(source_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = source_data.sel->get_index(i);
+		if (!source_data.validity.RowIsValid(idx)) {
+			FlatVector::SetNull(result, i, true);
+			continue;
+		}
+
+		NumRange range = ParseNumRange(source_ptr[idx].GetString());
+		auto serialized = SerializeNumRange(range, result);
+		FlatVector::GetData<string_t>(result)[i] = serialized;
+	}
+	return true;
+}
+
+static void NumRangeConstructor1(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &input_vec = args.data[0];
+	UnaryExecutor::Execute<string_t, string_t>(input_vec, result, args.size(), [&](string_t input) {
+		NumRange range = ParseNumRange(input.GetString());
+		return SerializeNumRange(range, result);
+	});
+}
+
+static void NumRangeOverlaps(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &r1_vec = args.data[0];
+	auto &r2_vec = args.data[1];
+
+	BinaryExecutor::Execute<string_t, string_t, bool>(
+	    r1_vec, r2_vec, result, args.size(), [&](string_t r1_blob, string_t r2_blob) {
+		    auto r1 = DeserializeNumRange(r1_blob);
+		    auto r2 = DeserializeNumRange(r2_blob);
+
+		    if (IsEmptyNum(r1) || IsEmptyNum(r2))
+			    return false;
+
+		    bool r1_left_of_r2 = (r1.upper < r2.lower) || (r1.upper == r2.lower && (!r1.upper_inc || !r2.lower_inc));
+		    bool r2_left_of_r1 = (r2.upper < r1.lower) || (r2.upper == r1.lower && (!r2.upper_inc || !r1.lower_inc));
+
+		    return !(r1_left_of_r2 || r2_left_of_r1);
+	    });
+}
+
+static void NumRangeContains(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &range_vec = args.data[0];
+	auto &value_vec = args.data[1];
+
+	BinaryExecutor::Execute<string_t, double, bool>(
+	    range_vec, value_vec, result, args.size(), [&](string_t range_blob, double value) {
+		    auto range = DeserializeNumRange(range_blob);
+
+		    if (IsEmptyNum(range))
+			    return false;
+
+		    bool above_lower = (value > range.lower) || (value == range.lower && range.lower_inc);
+		    bool below_upper = (value < range.upper) || (value == range.upper && range.upper_inc);
+
+		    return above_lower && below_upper;
+	    });
+}
+
+static void NumRangeContainedBy(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &value_vec = args.data[0];
+	auto &range_vec = args.data[1];
+
+	BinaryExecutor::Execute<double, string_t, bool>(
+	    value_vec, range_vec, result, args.size(), [&](double value, string_t range_blob) {
+		    auto range = DeserializeNumRange(range_blob);
+
+		    if (IsEmptyNum(range))
+			    return false;
+
+		    bool above_lower = (value > range.lower) || (value == range.lower && range.lower_inc);
+		    bool below_upper = (value < range.upper) || (value == range.upper && range.upper_inc);
+
+		    return above_lower && below_upper;
+	    });
+}
+
+static void NumRangeLower(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &range_vec = args.data[0];
+	UnaryExecutor::Execute<string_t, double>(range_vec, result, args.size(), [&](string_t range_blob) {
+		auto range = DeserializeNumRange(range_blob);
+		return range.lower;
+	});
+}
+
+static void NumRangeUpper(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &range_vec = args.data[0];
+	UnaryExecutor::Execute<string_t, double>(range_vec, result, args.size(), [&](string_t range_blob) {
+		auto range = DeserializeNumRange(range_blob);
+		return range.upper;
+	});
+}
+
+static void NumRangeIsEmpty(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &range_vec = args.data[0];
+	UnaryExecutor::Execute<string_t, bool>(range_vec, result, args.size(), [&](string_t range_blob) {
+		auto range = DeserializeNumRange(range_blob);
+		return IsEmptyNum(range);
+	});
+}
+
+static void NumRangeLowerInc(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &range_vec = args.data[0];
+	UnaryExecutor::Execute<string_t, bool>(range_vec, result, args.size(), [&](string_t range_blob) {
+		auto range = DeserializeNumRange(range_blob);
+		return range.lower_inc;
+	});
+}
+
+static void NumRangeUpperInc(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &range_vec = args.data[0];
+	UnaryExecutor::Execute<string_t, bool>(range_vec, result, args.size(), [&](string_t range_blob) {
+		auto range = DeserializeNumRange(range_blob);
+		return range.upper_inc;
+	});
+}
+
+static void NumRangeConstructor2(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &lower_vec = args.data[0];
+	auto &upper_vec = args.data[1];
+
+	BinaryExecutor::Execute<double, double, string_t>(
+	    lower_vec, upper_vec, result, args.size(),
+	    [&](double lower, double upper) { return ConstructNumRangeValue(result, lower, upper, true, false); });
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterType("INT4RANGE", GetInt4RangeType());
 
@@ -421,6 +753,77 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Accessor: upper_inc(INT4RANGE) -> BOOLEAN
 	ScalarFunction upper_inc_fun("upper_inc", {GetInt4RangeType()}, LogicalType::BOOLEAN, RangeUpperInc);
 	loader.RegisterFunction(upper_inc_fun);
+
+	//===--------------------------------------------------------------------===//
+	// NUMRANGE Registration
+	//===--------------------------------------------------------------------===//
+	loader.RegisterType("NUMRANGE", GetNumRangeType());
+
+	// Constructor: numrange(lower DOUBLE, upper DOUBLE, bounds VARCHAR) -> NUMRANGE
+	ScalarFunction numrange_fun("numrange", {LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::VARCHAR},
+	                            GetNumRangeType(), NumRangeConstructor);
+	loader.RegisterFunction(numrange_fun);
+
+	// Constructor: numrange(lower DOUBLE, upper DOUBLE) -> NUMRANGE (default bounds '[)')
+	ScalarFunction numrange_fun2("numrange", {LogicalType::DOUBLE, LogicalType::DOUBLE}, GetNumRangeType(),
+	                             NumRangeConstructor2);
+	loader.RegisterFunction(numrange_fun2);
+
+	// Constructor: numrange(varchar) -> NUMRANGE
+	ScalarFunction numrange_fun1("numrange", {LogicalType::VARCHAR}, GetNumRangeType(), NumRangeConstructor1);
+	loader.RegisterFunction(numrange_fun1);
+
+	// Constructor: numrange(lower DOUBLE, upper DOUBLE, lower_inc BOOLEAN, upper_inc BOOLEAN) -> NUMRANGE
+	ScalarFunction numrange_fun4("numrange",
+	                             {LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::BOOLEAN, LogicalType::BOOLEAN},
+	                             GetNumRangeType(), NumRangeConstructor4);
+	loader.RegisterFunction(numrange_fun4);
+
+	// Cast: NUMRANGE -> VARCHAR
+	loader.RegisterCastFunction(GetNumRangeType(), LogicalType::VARCHAR, BoundCastInfo(NumRangeToVarchar), 1);
+
+	// Cast: VARCHAR -> NUMRANGE
+	loader.RegisterCastFunction(LogicalType::VARCHAR, GetNumRangeType(), BoundCastInfo(VarcharToNumRangeCast), 1);
+
+	// Operator: range_overlaps(NUMRANGE, NUMRANGE) -> BOOLEAN
+	ScalarFunction num_overlaps_fun("range_overlaps", {GetNumRangeType(), GetNumRangeType()}, LogicalType::BOOLEAN,
+	                                NumRangeOverlaps);
+	loader.RegisterFunction(num_overlaps_fun);
+
+	// Operator: range_contains(NUMRANGE, DOUBLE) -> BOOLEAN
+	ScalarFunction num_contains_fun("range_contains", {GetNumRangeType(), LogicalType::DOUBLE}, LogicalType::BOOLEAN,
+	                                NumRangeContains);
+	loader.RegisterFunction(num_contains_fun);
+
+	// Contains operator @> for NUMRANGE
+	ScalarFunction num_contains_op("@>", {GetNumRangeType(), LogicalType::DOUBLE}, LogicalType::BOOLEAN,
+	                               NumRangeContains);
+	loader.RegisterFunction(num_contains_op);
+
+	// Contained by operator <@ for NUMRANGE
+	ScalarFunction num_contained_op("<@", {LogicalType::DOUBLE, GetNumRangeType()}, LogicalType::BOOLEAN,
+	                                NumRangeContainedBy);
+	loader.RegisterFunction(num_contained_op);
+
+	// Accessor: lower(NUMRANGE) -> DOUBLE
+	ScalarFunction num_lower_fun("lower", {GetNumRangeType()}, LogicalType::DOUBLE, NumRangeLower);
+	loader.RegisterFunction(num_lower_fun);
+
+	// Accessor: upper(NUMRANGE) -> DOUBLE
+	ScalarFunction num_upper_fun("upper", {GetNumRangeType()}, LogicalType::DOUBLE, NumRangeUpper);
+	loader.RegisterFunction(num_upper_fun);
+
+	// Accessor: isempty(NUMRANGE) -> BOOLEAN
+	ScalarFunction num_isempty_fun("isempty", {GetNumRangeType()}, LogicalType::BOOLEAN, NumRangeIsEmpty);
+	loader.RegisterFunction(num_isempty_fun);
+
+	// Accessor: lower_inc(NUMRANGE) -> BOOLEAN
+	ScalarFunction num_lower_inc_fun("lower_inc", {GetNumRangeType()}, LogicalType::BOOLEAN, NumRangeLowerInc);
+	loader.RegisterFunction(num_lower_inc_fun);
+
+	// Accessor: upper_inc(NUMRANGE) -> BOOLEAN
+	ScalarFunction num_upper_inc_fun("upper_inc", {GetNumRangeType()}, LogicalType::BOOLEAN, NumRangeUpperInc);
+	loader.RegisterFunction(num_upper_inc_fun);
 }
 
 void RangesExtension::Load(ExtensionLoader &loader) {
