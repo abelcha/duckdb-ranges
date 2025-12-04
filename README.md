@@ -58,7 +58,7 @@ SELECT int4range('empty') AS range;
 
 Syntax: `[lower,upper)` where:
 - `[` or `(` indicates inclusive or exclusive lower bound
-- `]` or `)` indicates inclusive or exclusive upper bound
+- `]` or `)` indicates inclusive or exc`lusive upper bound
 
 #### 2. Integer Bounds with Default Notation
 ```sql
