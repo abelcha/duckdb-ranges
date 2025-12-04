@@ -56,8 +56,9 @@ static Int4Range DeserializeInt4Range(const string_t &blob) {
 static bool IsEmpty(const Int4Range &range) {
 	// If lower > upper, it's empty.
 	// If lower == upper, it's empty unless both bounds are inclusive [].
-	if (range.lower > range.upper)
+	if (range.lower > range.upper) {
 		return true;
+	}
 	if (range.lower == range.upper) {
 		return !(range.lower_inc && range.upper_inc); // Only [] is non-empty for equal bounds
 	}
