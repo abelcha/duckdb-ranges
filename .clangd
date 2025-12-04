@@ -1,0 +1,18 @@
+---
+CompileFlags:
+  Add:
+    - "-I/Volumes/build/duckdb-ranges/src/include"
+    - "-I/Volumes/build/duckdb-ranges/duckdb/src/include"
+    - "-I/Volumes/build/duckdb-ranges/duckdb/src/common/include"
+    - "-std=c++11"
+    - "-fPIC"
+  Compiler: clang++
+
+InlayHints:
+  Enabled: true
+  ParameterHints: true
+  TypeHints: true
+  DeducedTypes: true
+
+Index:
+  Background: Build
