@@ -280,6 +280,25 @@ static void RangeContains(DataChunk &args, ExpressionState &state, Vector &resul
 	    });
 }
 
+static void RangeContainedBy(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &value_vec = args.data[0];
+	auto &range_vec = args.data[1];
+
+	BinaryExecutor::Execute<int32_t, string_t, bool>(
+	    value_vec, range_vec, result, args.size(), [&](int32_t value, string_t range_blob) {
+		    auto range = DeserializeInt4Range(range_blob);
+
+		    if (IsEmpty(range))
+			    return false;
+
+		    // Check if value is within bounds
+		    bool above_lower = (value > range.lower) || (value == range.lower && range.lower_inc);
+		    bool below_upper = (value < range.upper) || (value == range.upper && range.upper_inc);
+
+		    return above_lower && below_upper;
+	    });
+}
+
 // Accessor: lower(INT4RANGE) -> INTEGER
 static void RangeLower(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &range_vec = args.data[0];
@@ -373,6 +392,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ScalarFunction contains_fun("range_contains", {GetInt4RangeType(), LogicalType::INTEGER}, LogicalType::BOOLEAN,
 	                            RangeContains);
 	loader.RegisterFunction(contains_fun);
+
+	// Contains operator @>
+	ScalarFunction contains_op("@>", {GetInt4RangeType(), LogicalType::INTEGER}, LogicalType::BOOLEAN, RangeContains);
+	loader.RegisterFunction(contains_op);
+
+	// Contained by operator <@
+	ScalarFunction contained_op("<@", {LogicalType::INTEGER, GetInt4RangeType()}, LogicalType::BOOLEAN,
+	                            RangeContainedBy);
+	loader.RegisterFunction(contained_op);
 
 	// Accessor: lower(INT4RANGE) -> INTEGER
 	ScalarFunction lower_fun("lower", {GetInt4RangeType()}, LogicalType::INTEGER, RangeLower);
