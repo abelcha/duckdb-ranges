@@ -16,7 +16,7 @@ This extension provides the `INT4RANGE` type and associated functions for workin
 ### Building from Source
 
 ```sh
-git clone --recurse-submodules https://github.com/<you>/duckdb-ranges.git
+git clone --recurse-submodules https://github.com/abelcha/duckdb-ranges.git
 cd duckdb-ranges
 make
 ```
@@ -254,3 +254,4 @@ To contribute:
 3. Add tests for new functionality
 4. Ensure all tests pass with `make test`
 5. Submit a pull request
+
