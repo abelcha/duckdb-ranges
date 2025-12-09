@@ -732,3 +732,374 @@ query I
 SELECT int4range(3, 7, false, false) = int4range('(3,7)');
 ----
 true
+
+#===--------------------------------------------------------------------===#
+# NUMRANGE Tests
+#===--------------------------------------------------------------------===#
+
+# Test basic numrange construction with 3-arg constructor
+query I
+SELECT numrange(1.5, 5.5, '[)');
+----
+[1.500000,5.500000)
+
+query I
+SELECT numrange(1.0, 5.0, '[]');
+----
+[1.000000,5.000000]
+
+query I
+SELECT numrange(1.5, 5.5, '()');
+----
+(1.500000,5.500000)
+
+query I
+SELECT numrange(1.5, 5.5, '(]');
+----
+(1.500000,5.500000]
+
+# Test 2-argument numrange constructor (defaults to '[)')
+query I
+SELECT numrange(1.5, 5.5);
+----
+[1.500000,5.500000)
+
+query I
+SELECT numrange(10.25, 20.75);
+----
+[10.250000,20.750000)
+
+query I
+SELECT numrange(-5.5, 5.5);
+----
+[-5.500000,5.500000)
+
+# Test 4-argument numrange constructor
+query I
+SELECT numrange(1.5, 5.5, true, false);
+----
+[1.500000,5.500000)
+
+query I
+SELECT numrange(1.5, 5.5, true, true);
+----
+[1.500000,5.500000]
+
+query I
+SELECT numrange(1.5, 5.5, false, true);
+----
+(1.500000,5.500000]
+
+query I
+SELECT numrange(1.5, 5.5, false, false);
+----
+(1.500000,5.500000)
+
+# Test numrange with negative numbers
+query I
+SELECT numrange(-10.5, -5.5, '[)');
+----
+[-10.500000,-5.500000)
+
+query I
+SELECT numrange(-5.5, 5.5, '[]');
+----
+[-5.500000,5.500000]
+
+# Test numrange with zero
+query I
+SELECT numrange(0.0, 10.5, '[)');
+----
+[0.000000,10.500000)
+
+query I
+SELECT numrange(-10.5, 0.0, '(]');
+----
+(-10.500000,0.000000]
+
+# Test empty numrange
+query I
+SELECT numrange(5.5, 1.5, '[)');
+----
+empty
+
+query I
+SELECT numrange(1.0, 1.0, '()');
+----
+empty
+
+query I
+SELECT numrange(1.0, 1.0, '[)');
+----
+empty
+
+query I
+SELECT numrange(1.0, 1.0, '(]');
+----
+empty
+
+query I
+SELECT numrange(1.0, 1.0, '[]');
+----
+[1.000000,1.000000]
+
+# Test numrange_contains
+query I
+SELECT range_contains(numrange(1.0, 10.0, '[)'), 5.5);
+----
+true
+
+query I
+SELECT range_contains(numrange(1.0, 10.0, '[)'), 1.0);
+----
+true
+
+query I
+SELECT range_contains(numrange(1.0, 10.0, '[)'), 10.0);
+----
+false
+
+query I
+SELECT range_contains(numrange(1.0, 10.0, '[]'), 10.0);
+----
+true
+
+query I
+SELECT range_contains(numrange(1.0, 10.0, '()'), 1.0);
+----
+false
+
+query I
+SELECT range_contains(numrange(1.0, 10.0, '(]'), 10.0);
+----
+true
+
+# Test numrange_contains with negative numbers
+query I
+SELECT range_contains(numrange(-10.5, 0.0, '[)'), -5.5);
+----
+true
+
+query I
+SELECT range_contains(numrange(-10.5, 0.0, '[)'), 0.0);
+----
+false
+
+query I
+SELECT range_contains(numrange(-10.5, 0.0, '[]'), 0.0);
+----
+true
+
+# Test numrange @> operator
+query I
+SELECT numrange(1.0, 10.0, '[)') @> 5.5;
+----
+true
+
+query I
+SELECT numrange(1.0, 10.0, '[)') @> 1.0;
+----
+true
+
+query I
+SELECT numrange(1.0, 10.0, '[)') @> 10.0;
+----
+false
+
+query I
+SELECT numrange(1.0, 10.0, '[]') @> 10.0;
+----
+true
+
+# Test numrange <@ operator
+query I
+SELECT 5.5 <@ numrange(1.0, 10.0, '[)');
+----
+true
+
+query I
+SELECT 1.0 <@ numrange(1.0, 10.0, '[)');
+----
+true
+
+query I
+SELECT 10.0 <@ numrange(1.0, 10.0, '[)');
+----
+false
+
+query I
+SELECT 10.0 <@ numrange(1.0, 10.0, '[]');
+----
+true
+
+# Test numrange overlaps
+query I
+SELECT range_overlaps(numrange(1.0, 5.0, '[)'), numrange(3.0, 7.0, '[)'));
+----
+true
+
+query I
+SELECT range_overlaps(numrange(1.0, 5.0, '[)'), numrange(5.0, 10.0, '[)'));
+----
+false
+
+query I
+SELECT range_overlaps(numrange(1.0, 5.0, '[]'), numrange(5.0, 10.0, '[]'));
+----
+true
+
+query I
+SELECT range_overlaps(numrange(1.0, 5.0, '[)'), numrange(6.0, 10.0, '[)'));
+----
+false
+
+# Test numrange accessors
+query I
+SELECT lower(numrange(1.5, 10.5, '[)'));
+----
+1.5
+
+query I
+SELECT upper(numrange(1.5, 10.5, '[)'));
+----
+10.5
+
+query I
+SELECT lower_inc(numrange(1.5, 10.5, '[)'));
+----
+true
+
+query I
+SELECT upper_inc(numrange(1.5, 10.5, '[)'));
+----
+false
+
+query I
+SELECT lower_inc(numrange(1.5, 10.5, '()'));
+----
+false
+
+query I
+SELECT upper_inc(numrange(1.5, 10.5, '[]'));
+----
+true
+
+query I
+SELECT isempty(numrange(1.5, 10.5, '[)'));
+----
+false
+
+query I
+SELECT isempty(numrange(5.5, 1.5, '[)'));
+----
+true
+
+query I
+SELECT isempty(numrange(1.0, 1.0, '[]'));
+----
+false
+
+query I
+SELECT isempty(numrange(1.0, 1.0, '[)'));
+----
+true
+
+# Test numrange with NULL
+query I
+SELECT numrange(NULL, 5.5, '[)');
+----
+NULL
+
+query I
+SELECT numrange(1.5, NULL, '[)');
+----
+NULL
+
+query I
+SELECT numrange(1.5, 5.5, NULL);
+----
+NULL
+
+query I
+SELECT range_contains(NULL::NUMRANGE, 5.5);
+----
+NULL
+
+query I
+SELECT range_contains(numrange(1.5, 10.5, '[)'), NULL);
+----
+NULL
+
+# Test numrange 1-argument constructor (string parsing)
+query I
+SELECT numrange('[3.5,7.5)');
+----
+[3.500000,7.500000)
+
+query I
+SELECT numrange('(3.5,7.5)');
+----
+(3.500000,7.500000)
+
+query I
+SELECT numrange('[4.0,4.0]');
+----
+[4.000000,4.000000]
+
+query I
+SELECT numrange('[4.0,4.0)');
+----
+empty
+
+query I
+SELECT numrange('empty');
+----
+empty
+
+# Test numrange casting to VARCHAR
+query I
+SELECT numrange(10.5, 20.5, '[]')::VARCHAR;
+----
+[10.500000,20.500000]
+
+query I
+SELECT numrange(10.5, 20.5, '()')::VARCHAR;
+----
+(10.500000,20.500000)
+
+# Test VARCHAR to numrange casting
+query I
+SELECT '[3.5,7.5)'::numrange;
+----
+[3.500000,7.500000)
+
+query I
+SELECT '(3.5,7.5)'::numrange;
+----
+(3.500000,7.500000)
+
+query I
+SELECT 'empty'::numrange;
+----
+empty
+
+# Test consistency between numrange constructors
+query I
+SELECT numrange(3.5, 7.5, '[)') = numrange('[3.5,7.5)');
+----
+true
+
+query I
+SELECT numrange(3.5, 7.5, false, false) = numrange('(3.5,7.5)');
+----
+true
+
+query I
+SELECT numrange(3.5, 7.5, true, true) = numrange('[3.5,7.5]');
+----
+true
+
+query I
+SELECT numrange(3.5, 7.5, false, true) = numrange('(3.5,7.5]');
+----
+true

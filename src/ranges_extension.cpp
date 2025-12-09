@@ -144,10 +144,10 @@ static void Int4RangeConstructor4(DataChunk &args, ExpressionState &state, Vecto
 	auto upper_inc_ptr = UnifiedVectorFormat::GetData<bool>(upper_inc_data);
 
 	for (idx_t i = 0; i < count; i++) {
-		auto lower_idx = lower_data.sel->get_index(i);
-		auto upper_idx = upper_data.sel->get_index(i);
-		auto lower_inc_idx = lower_inc_data.sel->get_index(i);
-		auto upper_inc_idx = upper_inc_data.sel->get_index(i);
+		idx_t lower_idx = lower_data.sel ? lower_data.sel->get_index(i) : i;
+		idx_t upper_idx = upper_data.sel ? upper_data.sel->get_index(i) : i;
+		idx_t lower_inc_idx = lower_inc_data.sel ? lower_inc_data.sel->get_index(i) : i;
+		idx_t upper_inc_idx = upper_inc_data.sel ? upper_inc_data.sel->get_index(i) : i;
 
 		if (!lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx) ||
 		    !lower_inc_data.validity.RowIsValid(lower_inc_idx) || !upper_inc_data.validity.RowIsValid(upper_inc_idx)) {
@@ -189,6 +189,7 @@ static void Int4RangeConstructor(DataChunk &args, ExpressionState &state, Vector
 				    throw InvalidInputException("Invalid bounds: " + bounds_str);
 			    }
 		    }
+
 		    return ConstructInt4RangeValue(result, lower, upper, lower_inc, upper_inc);
 	    });
 }
@@ -259,7 +260,8 @@ static void RangeOverlaps(DataChunk &args, ExpressionState &state, Vector &resul
 			    return false;
 
 		    // Overlap logic: not (r1 entirely left of r2 or r1 entirely right of r2)
-		    // r1 left of r2: r1.upper < r2.lower OR (r1.upper == r2.lower AND (!r1.upper_inc OR !r2.lower_inc))
+		    // r1 left of r2: r1.upper < r2.lower OR (r1.upper == r2.lower AND (!r1.upper_inc OR
+		    // !r2.lower_inc))
 
 		    bool r1_left_of_r2 = (r1.upper < r2.lower) || (r1.upper == r2.lower && (!r1.upper_inc || !r2.lower_inc));
 		    bool r2_left_of_r1 = (r2.upper < r1.lower) || (r2.upper == r1.lower && (!r2.upper_inc || !r1.lower_inc));
@@ -271,23 +273,23 @@ static void RangeOverlaps(DataChunk &args, ExpressionState &state, Vector &resul
 // Aggressively optimized inline containment check for hot path (JOIN operations)
 // This is the critical path for pricing grid matching queries
 static inline bool ContainsValue(const Int4Range &range, int32_t value) {
-	// Branch-free fast rejection: value outside [lower, upper] 
+	// Branch-free fast rejection: value outside [lower, upper]
 	// This handles 90%+ of cases in typical pricing grid queries
 	const bool outside = (value < range.lower) | (value > range.upper);
 	if (outside) [[unlikely]] {
 		return false;
 	}
-	
+
 	// Value is within [lower, upper], now check boundary inclusivity
 	// Common case: value is strictly inside, not on boundaries
 	const bool on_lower = (value == range.lower);
 	const bool on_upper = (value == range.upper);
-	
+
 	// Fast path: not on any boundary (most common in pricing grids)
 	if (!(on_lower | on_upper)) [[likely]] {
 		return true;
 	}
-	
+
 	// Boundary cases: check inclusivity flags
 	// Use bitwise operations to avoid branches
 	return (!on_lower | range.lower_inc) & (!on_upper | range.upper_inc);
@@ -609,10 +611,10 @@ static void NumRangeConstructor4(DataChunk &args, ExpressionState &state, Vector
 	auto upper_inc_ptr = UnifiedVectorFormat::GetData<bool>(upper_inc_data);
 
 	for (idx_t i = 0; i < count; i++) {
-		auto lower_idx = lower_data.sel->get_index(i);
-		auto upper_idx = upper_data.sel->get_index(i);
-		auto lower_inc_idx = lower_inc_data.sel->get_index(i);
-		auto upper_inc_idx = upper_inc_data.sel->get_index(i);
+		idx_t lower_idx = lower_data.sel ? lower_data.sel->get_index(i) : i;
+		idx_t upper_idx = upper_data.sel ? upper_data.sel->get_index(i) : i;
+		idx_t lower_inc_idx = lower_inc_data.sel ? lower_inc_data.sel->get_index(i) : i;
+		idx_t upper_inc_idx = upper_inc_data.sel ? upper_inc_data.sel->get_index(i) : i;
 
 		if (!lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx) ||
 		    !lower_inc_data.validity.RowIsValid(lower_inc_idx) || !upper_inc_data.validity.RowIsValid(upper_inc_idx)) {
