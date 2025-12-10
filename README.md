@@ -1,6 +1,6 @@
 # DuckDB Ranges Extension
 
-A DuckDB extension that implements PostgreSQL-compatible range types and operations, enabling efficient storage and querying of value ranges.
+A DuckDB extension that implements [PostgreSQL-compatible range types and operations](https://www.postgresql.org/docs/current/rangetypes.html), enabling efficient storage and querying of value ranges.
 
 ## Features
 
@@ -52,8 +52,8 @@ The `int4range()` function supports multiple signatures:
 SELECT int4range('[1,10)') AS range;
 -- Result: [1,10)
 
-SELECT int4range('empty') AS range;
--- Result: empty
+SELECT int4range(3, 10) AS range;
+-- Result: [3, 10]
 ```
 
 Syntax: `[lower,upper)` where:
